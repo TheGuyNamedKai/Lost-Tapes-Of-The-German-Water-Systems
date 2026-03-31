@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Reservoir - Movement Overhaul</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: monospace; color: #00ffaa; touch-action: none; user-select: none; -webkit-user-select: none; }
+        canvas { display: block; position: absolute; top: 0; left: 0; }
+        .screen { position: absolute; inset: 0; background: radial-gradient(circle, #001a1a 0%, #000 100%); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; text-align: center; }
+        input { background: #000; border: 2px solid #00ffaa; color: #fff; padding: 15px; margin: 10px; text-align: center; width: 260px; font-size: 16px; outline: none; }
+        .btn-ui { width: 280px; padding: 18px; margin: 8px; background: rgba(0, 50, 50, 0.4); border: 2px solid #00ffaa; color: #00ffaa; font-weight: bold; cursor: pointer; }
+        .btn-back { border-color: #666; color: #666; width: 180px; padding: 10px; margin-top: 20px; }
+        
+        #game-ui { display: none; position: absolute; inset: 0; pointer-events: none; z-index: 10; }
+        .pad { position: absolute; bottom: 40px; display: grid; grid-template-columns: repeat(3, 75px); grid-template-rows: repeat(3, 75px); gap: 10px; pointer-events: auto; }
+        #move-pad { left: 20px; }
+        #cam-pad { right: 20px; }
+        .ctrl { width: 75px; height: 75px; background: rgba(0, 40, 40, 0.6); border: 2px solid #00ffaa; color: #00ffaa; display: flex; align-items: center; justify-content: center; border-radius: 8px; font-size: 18px; font-weight: bold; transition: background 0.1s; }
+        
+        .p-up { grid-column: 2; grid-row: 1; }
+        .p-l { grid-column: 1; grid-row: 2; }
+        .p-mid { grid-column: 2; grid-row: 2; }
+        .p-r { grid-column: 3; grid-row: 2; }
+        .p-dn { grid-column: 2; grid-row: 3; }
+    </style>
+</head>
+<body>
+
+<div id="screen-main" class="screen">
+    <h1>RESERVOIR_NET</h1>
+    <input type="text" id="u-name" placeholder="USERNAME">
+    <button class="btn-ui" onclick="showS('screen-host')">HOST</button>
+    <button class="btn-ui" onclick="showS('screen-join')">JOIN</button>
+</div>
+
+<div id="screen-host" class="screen" style="display:none">
+    <h1>HOST</h1>
+    <input type="text" id="h-code" placeholder="CODE">
+    <button class="btn-ui" onclick="doHost()">START</button>
+    <button class="btn-ui btn-back" onclick="showS('screen-main')">BACK</button>
+</div>
+
+<div id="screen-join" class="screen" style="display:none">
+    <h1>JOIN</h1>
+    <input type="text" id="j-code" placeholder="CODE">
+    <button class="btn-ui" onclick="doJoin()">CONNECT</button>
+    <button class="btn-ui btn-back" onclick="showS('screen-main')">BACK</button>
+</div>
+
+<div id="game-ui">
+    <div id="move-pad" class="pad">
+        <div class="ctrl p-up" id="fwd">↑</div>
+        <div class="ctrl p-l" id="lft">←</div>
+        <div class="ctrl p-mid" id="bwd">↓</div>
+        <div class="ctrl p-r" id="rgt">→</div>
+    </div>
+    <div id="cam-pad" class="pad">
+        <div class="ctrl p-up" id="camU">UP</div>
+        <div class="ctrl p-l" id="camL">L</div>
+        <div class="ctrl p-mid" id="camD">DN</div>
+        <div class="ctrl p-r" id="camR">R</div>
+    </div>
+</div>
+
+<script type="importmap"> { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } } </script>
+
+<script type="module">
+    import * as THREE from 'three';
+
+    let scene, camera, renderer, peer, conn, flashObj, flashTarget;
+    let players = {};
+    const input = { fwd:0, bwd:0, lft:0, rgt:0, cU:0, cD:0, cL:0, cR:0 };
+    let yaw = 0, pitch = 0;
+    const chunks = new Set();
+
+    window.showS = (id) => {
+        document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+        document.getElementById(id).style.display = 'flex';
+    };
+
+    window.doHost = () => {
+        const c = document.getElementById('h-code').value.toLowerCase();
+        peer = new Peer(c);
+        peer.on('open', () => start());
+        peer.on('connection', (cn) => { conn = cn; setupC(cn); });
+    };
+
+    window.doJoin = () => {
+        const c = document.getElementById('j-code').value.toLowerCase();
+        peer = new Peer();
+        peer.on('open', () => {
+            conn = peer.connect(c);
+            setupC(conn);
+            start();
+        });
+    };
+
+    function setupC(c) {
+        c.on('data', (d) => {
+            if(!players[d.id]) {
+                const g = new THREE.Group();
+                const b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1, 0.3), new THREE.MeshStandardMaterial({color: 0x111111}));
+                const h = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 12), new THREE.MeshStandardMaterial({color: 0x00ffaa, emissive: 0x00ffaa, emissiveIntensity: 2}));
+                h.position.y = 0.7; g.add(b, h); scene.add(g); players[d.id] = g;
+            }
+            players[d.id].position.set(d.x, 0.5, d.z);
+            players[d.id].rotation.y = d.y;
+        });
+    }
+
+    function start() {
+        document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+        document.getElementById('game-ui').style.display = 'block';
+        init();
+    }
+
+    function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000303);
+        scene.fog = new THREE.Fog(0x000303, 1, 35);
+
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        camera.rotation.order = 'YXZ';
+        
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0x00ffff, 0.01));
+
+        flashObj = new THREE.SpotLight(0xffffff, 300, 45, 0.45, 0.4, 1.1);
+        flashTarget = new THREE.Object3D();
+        flashObj.target = flashTarget;
+        scene.add(flashObj, flashTarget);
+
+        // BULLETPROOF POINTER EVENTS
+        const bind = (id, k) => {
+            const e = document.getElementById(id);
+            if (!e) return;
+            
+            const press = (v) => { v.preventDefault(); e.style.background = 'rgba(0,100,100,0.8)'; input[k] = 1; };
+            const release = (v) => { v.preventDefault(); e.style.background = 'rgba(0,40,40,0.6)'; input[k] = 0; };
+            
+            e.addEventListener('pointerdown', press);
+            e.addEventListener('pointerup', release);
+            e.addEventListener('pointerleave', release); // Stops ghost touches if thumb slides off
+            e.addEventListener('pointercancel', release);
+        };
+
+        bind('fwd','fwd'); bind('bwd','bwd'); bind('lft','lft'); bind('rgt','rgt');
+        bind('camU','cU'); bind('camD','cD'); bind('camL','cL'); bind('camR','cR');
+
+        camera.position.set(0, 1.7, 0);
+
+        function loop() {
+            requestAnimationFrame(loop);
+
+            // Camera Look
+            yaw += (input.cL - input.cR) * 0.04;
+            pitch = Math.max(-1.4, Math.min(1.4, pitch + (input.cU - input.cD) * 0.04));
+            camera.rotation.set(pitch, yaw, 0);
+
+            // Flashlight Sway
+            flashObj.position.lerp(camera.position, 0.12);
+            flashTarget.position.lerp(camera.position.clone().add(new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion)), 0.08);
+
+            // NEW SLIDING COLLISION SYSTEM
+            const speed = 0.09;
+            const dir = new THREE.Vector3(0, 0, 0);
+            if (input.fwd) dir.z -= 1;
+            if (input.bwd) dir.z += 1;
+            if (input.lft) dir.x -= 1;
+            if (input.rgt) dir.x += 1;
+
+            if (dir.lengthSq() > 0) {
+                dir.normalize();
+                dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+                
+                const collisionRadius = 1.6;
+
+                // Test X axis independently
+                let nextX = camera.position.x + dir.x * speed;
+                let gridX_Test = Math.round(nextX / 10) * 10;
+                let gridZ_Current = Math.round(camera.position.z / 10) * 10;
+                if (Math.hypot(nextX - gridX_Test, camera.position.z - gridZ_Current) >= collisionRadius) {
+                    camera.position.x = nextX;
+                }
+
+                // Test Z axis independently
+                let nextZ = camera.position.z + dir.z * speed;
+                let gridX_Current = Math.round(camera.position.x / 10) * 10;
+                let gridZ_Test = Math.round(nextZ / 10) * 10;
+                if (Math.hypot(camera.position.x - gridX_Current, nextZ - gridZ_Test) >= collisionRadius) {
+                    camera.position.z = nextZ;
+                }
+            }
+
+            // ANTI-STUCK FAILSAFE (Ejects player if trapped)
+            let currentGX = Math.round(camera.position.x / 10) * 10;
+            let currentGZ = Math.round(camera.position.z / 10) * 10;
+            let distToCenter = Math.hypot(camera.position.x - currentGX, camera.position.z - currentGZ);
+            
+            if (distToCenter < 1.6) {
+                let escapeAngle = Math.atan2(camera.position.z - currentGZ, camera.position.x - currentGX);
+                camera.position.x = currentGX + Math.cos(escapeAngle) * 1.61;
+                camera.position.z = currentGZ + Math.sin(escapeAngle) * 1.61;
+            }
+
+            // World Gen
+            const cx = Math.round(camera.position.x / 10);
+            const cz = Math.round(camera.position.z / 10);
+            for(let x=cx-4; x<=cx+4; x++) {
+                for(let z=cz-4; z<=cz+4; z++) {
+                    const id = `${x},${z}`;
+                    if(!chunks.has(id)) {
+                        const px = x*10, pz = z*10;
+                        const p = new THREE.Mesh(new THREE.CylinderGeometry(1, 1.5, 12, 16), new THREE.MeshStandardMaterial({color: 0x223333}));
+                        p.position.set(px, 6, pz); scene.add(p);
+                        
+                        const f = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), new THREE.MeshStandardMaterial({color: 0x002222, metalness: 0.7, roughness: 0.1}));
+                        f.rotation.x = -Math.PI/2; f.position.set(px, 0, pz); scene.add(f);
+                        
+                        const r = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), new THREE.MeshStandardMaterial({color: 0x050505}));
+                        r.rotation.x = Math.PI/2; r.position.set(px, 12, pz); scene.add(r);
+                        
+                        chunks.add(id);
+                    }
+                }
+            }
+
+            if(conn && conn.open) conn.send({id: peer.id, x: camera.position.x, z: camera.position.z, y: yaw});
+            renderer.render(scene, camera);
+        }
+        loop();
+    }
+</script>
+</body>
+</html>
